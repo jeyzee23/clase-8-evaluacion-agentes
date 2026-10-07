@@ -1,0 +1,148 @@
+{
+  "name": "Clase 8 · SUPERVISOR_Judge",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## SUPERVISOR_Judge · AI-as-a-Judge\nSub-workflow **dedicado solo a evaluar**. Lo llama el flujo principal con `{ contexto, respuesta_agente, intento }`.\n**El Juez pone la nota** (rúbrica en el System Message, salida JSON) · **el código decide la ruta** (umbrales 9 / 6 y máximo 2 reintentos).",
+        "height": 160,
+        "width": 920,
+        "color": 5
+      },
+      "id": "3f0d7a6b-0c46-4240-9762-7ada38ca8536",
+      "name": "Nota",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "6bc4f542-5b6a-4ac8-9df7-072b78fd55d4",
+      "name": "Recibe la respuesta",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ 'SEÑALES QUE RECIBIÓ EL AGENTE:\\n' + $json.contexto + '\\n\\nRESPUESTA DEL AGENTE:\\n' + JSON.stringify($json.respuesta_agente, null, 2) }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "Sos el Juez: un auditor de calidad de IA. Evaluás la respuesta de un Agente de Churn de un SaaS B2B.\nNo reescribís la respuesta: la calificás contra esta rúbrica, usando SOLO las señales que recibió el agente.\n\nRÚBRICA (arrancá en 10 y descontá)\n1. Fidelidad (-3, una sola vez): ¿menciona métricas, historial, nombres o hechos que NO están en las señales? Descontá 3 aunque sean varios datos.\n2. Coherencia (hasta -2): ¿el diagnóstico y la acción contradicen el health score, los tickets o el mensaje del cliente?\n3. Accionable (-1): ¿la acción recomendada no es un paso concreto para el CSM?\n4. Borrador (-1): ¿tiene más de 4 líneas o no es empático?\n5. Marca de riesgo (-1): accion_sensible tiene que ser true si propone descuento, precio, reembolso o contactar a un C-level.\n\nESTADO\n- APROBADO: sin errores.\n- CORREGIR: errores que se arreglan reescribiendo. Los datos que no están en las señales son CORREGIR: se arreglan sacándolos.\n- ESCALAR: solo si el borrador le promete al cliente dinero, reembolsos, descuentos o beneficios que no figuran en las señales, o si expone datos sensibles. En ese caso el score es 4 como máximo.\n\nREGLAS\n- Primero listá los errores, después justificá y recién al final poné el score (entero de 0 a 10).\n- Cada error dice qué está mal y cómo corregirlo, en una línea. Si no hay errores, lista vacía.\n- No premies las respuestas largas: la concisión vale más que la prolijidad.\n- justificacion: 1 o 2 frases. Español rioplatense.",
+          "maxIterations": 3
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "id": "e11e0a6d-82f1-4c72-a7f7-ac951eece064",
+      "name": "Juez",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "da451c54-a39b-4531-9616-6264adbcf85f",
+      "name": "Groq (Juez)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        200,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"errores\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"string\"\n      }\n    },\n    \"justificacion\": {\n      \"type\": \"string\"\n    },\n    \"score\": {\n      \"type\": \"integer\",\n      \"minimum\": 0,\n      \"maximum\": 10\n    },\n    \"estado\": {\n      \"type\": \"string\",\n      \"enum\": [\n        \"APROBADO\",\n        \"CORREGIR\",\n        \"ESCALAR\"\n      ]\n    }\n  },\n  \"required\": [\n    \"errores\",\n    \"justificacion\",\n    \"score\",\n    \"estado\"\n  ]\n}"
+      },
+      "id": "ce7ee7b8-a543-40c1-9292-272ebb964b93",
+      "name": "Formato veredicto",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.2,
+      "position": [
+        400,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// EL JUEZ PONE LA NOTA, EL CÓDIGO DECIDE LA RUTA (umbrales fijos y auditables).\nconst e = $('Recibe la respuesta').first().json; // lo que mandó el flujo principal\nconst v = $input.first().json.output;           // el veredicto del Juez\nconst r = e.respuesta_agente;                    // la respuesta del agente\n\n// REGLA DURA: si el borrador le promete plata al cliente, decide una persona. Siempre.\n// No depende de la nota del Juez: esto lo decide el código.\nconst prometeDinero = /(reembols|devoluci|descuento|bonificaci|gratis|sin cargo|cr[eé]dito a favor)/i\n  .test(r.borrador_mensaje || '');\n\nlet estado = 'ESCALAR';                     // menos de 6\nif (v.score >= 9) estado = 'APROBADO';      // 9 o 10\nelse if (v.score >= 6) estado = 'CORREGIR'; // 6 a 8\n\nif (v.estado === 'ESCALAR') estado = 'ESCALAR';                  // si el Juez ve un riesgo serio, manda el riesgo\nif (prometeDinero) estado = 'ESCALAR';                           // regla dura: promesa de dinero\nif (estado === 'CORREGIR' && e.intento >= 2) estado = 'ESCALAR'; // máximo 2 reintentos: después decide un humano\n\nconst motivo = prometeDinero ? 'el borrador promete dinero al cliente (regla dura)' : '';\nconst resumen =\n  `<b>Juez: ${v.score}/10 · ${estado}</b> (intento ${e.intento + 1})<br>${v.justificacion}` +\n  (motivo ? `<br><b>Escalado porque:</b> ${motivo}` : '') +\n  (v.errores.length ? `<br><b>Errores:</b> ${v.errores.join(' · ')}` : '') +\n  `<br><br><b>Diagnóstico:</b> ${r.diagnostico}<br><b>Acción:</b> ${r.accion_recomendada}<br><b>Borrador:</b> ${r.borrador_mensaje}`;\n\nreturn [{ json: { ...e, score: v.score, estado, errores: v.errores, justificacion: v.justificacion, regla_dura: motivo, resumen } }];\n"
+      },
+      "id": "c6c39900-96e7-45d5-9992-c438731ebf53",
+      "name": "Umbrales",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Recibe la respuesta": {
+      "main": [
+        [
+          {
+            "node": "Juez",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq (Juez)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Juez",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formato veredicto": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Juez",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Juez": {
+      "main": [
+        [
+          {
+            "node": "Umbrales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
